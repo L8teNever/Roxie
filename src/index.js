@@ -34,7 +34,8 @@ client.on('guildCreate', setupGuild);
 // ---- Web-Oberfläche (bewusst ohne Login, nur lokal betreiben) ----
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// Kein Browser-Cache, damit nach Updates immer die neue Oberfläche geladen wird
+app.use(express.static(path.join(__dirname, '..', 'public'), { setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
 
 app.get('/api/state', (req, res) => {
   res.json({
