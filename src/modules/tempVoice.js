@@ -1,7 +1,17 @@
 // Modul: Join-to-create. Wer den Sprachkanal "Talk" betritt, bekommt eine eigene Kategorie
 // mit einem Sprachkanal, beide nach ihm benannt, und wird dorthin verschoben.
 // Ist der Raum 5 Minuten leer, wird die Kategorie samt Kanal gelöscht.
-const { Events, ChannelType, PermissionsBitField, PermissionFlagsBits } = require('discord.js');
+const {
+  Events,
+  ChannelType,
+  OverwriteType,
+  PermissionsBitField,
+  PermissionFlagsBits,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  UserSelectMenuBuilder,
+} = require('discord.js');
 
 const HUB_NAME = 'Talk';
 const EMPTY_MINUTES = 5;
@@ -13,6 +23,10 @@ const WRITE = [
   PermissionFlagsBits.CreatePrivateThreads,
   PermissionFlagsBits.SendMessagesInThreads,
 ];
+
+const P = PermissionFlagsBits;
+const ROOM_PERMS = [P.ViewChannel, P.Connect, P.Speak, P.SendMessages, P.ReadMessageHistory];
+const OWNER_PERMS = [...ROOM_PERMS, P.ManageChannels, P.ManageMessages, P.MoveMembers, P.MuteMembers];
 
 const timers = new Map(); // channelId -> Interval
 
@@ -28,8 +42,8 @@ function findHub(guild, config) {
 }
 
 // Gleiche Sichtbarkeit wie der Raum, aber nur lesen: niemand darf schreiben (nur Roxie)
-function readOnlyOverwrites(channel, botId) {
-  const others = channel.permissionOverwrites.cache
+function toReadOnly(list, botId) {
+  const others = list
     .filter((o) => o.id !== botId)
     .map((o) => ({
       id: o.id,
@@ -39,15 +53,17 @@ function readOnlyOverwrites(channel, botId) {
     }));
   others.push({
     id: botId,
-    allow: [
-      PermissionFlagsBits.ViewChannel,
-      PermissionFlagsBits.SendMessages,
-      PermissionFlagsBits.ReadMessageHistory,
-      PermissionFlagsBits.ManageChannels,
-    ],
+    type: OverwriteType.Member,
+    allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.ManageChannels],
   });
   return others;
 }
+
+const readOnlyOverwrites = (channel, botId) =>
+  toReadOnly(
+    channel.permissionOverwrites.cache.map((o) => ({ id: o.id, type: o.type, allow: o.allow, deny: o.deny })),
+    botId,
+  );
 
 const fmt = (sec) => `# ⏳ ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 
@@ -125,6 +141,8 @@ async function deleteRoom(guild, config, channelId) {
     }
     const category = guild.channels.cache.get(room.categoryId);
     if (category) await category.delete('Roxie: Talk-Raum war 5 Minuten leer');
+    const role = room.roleId && guild.roles.cache.get(room.roleId);
+    if (role) await role.delete('Roxie: Talk-Raum war 5 Minuten leer');
     console.log(`[tempVoice] Raum ${room.name} in ${guild.name} gelöscht`);
   } catch (err) {
     console.error('[tempVoice] Löschen fehlgeschlagen:', err.message);
@@ -156,6 +174,100 @@ function checkRoom(guild, config, channelId) {
   else if (timers.has(channelId)) return cancelCountdown(guild, config, channelId);
 }
 
+// Rechte für Kategorie, Sprach- und Chatkanal des Raums.
+// Öffentlich: zusätzlich die Rechte von Talk (alle mit der Rolle „Online“). Privat: nur Raum-Rolle (Besitzer + Ausgewählte).
+function roomOverwrites(guild, hub, roleId, ownerId, isPublic) {
+  const botId = guild.client.user.id;
+  const list = [
+    { id: guild.roles.everyone.id, type: OverwriteType.Role, deny: [P.ViewChannel] },
+    { id: roleId, type: OverwriteType.Role, allow: ROOM_PERMS },
+    { id: ownerId, type: OverwriteType.Member, allow: OWNER_PERMS },
+    { id: botId, type: OverwriteType.Member, allow: [...ROOM_PERMS, P.ManageChannels] },
+  ];
+  if (isPublic && hub) {
+    const taken = new Set(list.map((o) => o.id));
+    for (const o of hub.permissionOverwrites.cache.values()) {
+      if (!taken.has(o.id)) list.push({ id: o.id, type: o.type, allow: o.allow, deny: o.deny });
+    }
+  }
+  return list;
+}
+
+function settingsPayload(room, channelId) {
+  const toggle = new ButtonBuilder()
+    .setCustomId(`room:toggle:${channelId}`)
+    .setLabel(room.public ? 'Auf privat stellen' : 'Auf öffentlich stellen')
+    .setEmoji(room.public ? '🔒' : '🌐')
+    .setStyle(room.public ? ButtonStyle.Danger : ButtonStyle.Success);
+  const users = new UserSelectMenuBuilder()
+    .setCustomId(`room:users:${channelId}`)
+    .setPlaceholder('Wer darf in deinen Raum? (bei „Privat“ nötig)')
+    .setMinValues(0)
+    .setMaxValues(25);
+  if (room.allowed.length) users.setDefaultUsers(room.allowed.slice(0, 25));
+
+  return {
+    content:
+      `# ⚙️ Einstellungen: ${room.name}\n` +
+      (room.public
+        ? '**Öffentlich:** Alle mit der Rolle „Online“ sehen deinen Raum und dürfen rein.'
+        : '**Privat:** Nur du und die unten ausgewählten User sehen deinen Raum.') +
+      '\nDie Auswahl unten bestimmt, wer in deinen Raum darf, sobald er privat ist. ' +
+      'Der Raum wird gelöscht, wenn er 5 Minuten leer ist.',
+    components: [new ActionRowBuilder().addComponents(toggle), new ActionRowBuilder().addComponents(users)],
+  };
+}
+
+// Wendet öffentlich/privat auf alle Kanäle des Raums an
+async function applyMode(guild, config, channelId) {
+  const room = getRooms(config, guild.id)[channelId];
+  if (!room) return;
+  const overwrites = roomOverwrites(guild, findHub(guild, config), room.roleId, room.ownerId, room.public);
+  for (const id of [room.categoryId, channelId, room.chatId]) {
+    const ch = guild.channels.cache.get(id);
+    if (ch) await ch.permissionOverwrites.set(overwrites, 'Roxie: Raum-Einstellung geändert');
+  }
+  const countdown = room.countdownId && guild.channels.cache.get(room.countdownId);
+  if (countdown) await countdown.permissionOverwrites.set(toReadOnly(overwrites, guild.client.user.id));
+}
+
+// Reaktion auf Button/Auswahl im Einstellungskanal (nur der Besitzer)
+async function handleSettings(interaction, config) {
+  const [, action, channelId] = interaction.customId.split(':');
+  const guild = interaction.guild;
+  const rooms = getRooms(config, guild.id);
+  const room = rooms[channelId];
+  if (!room) return interaction.reply({ content: 'Diesen Raum gibt es nicht mehr.', ephemeral: true });
+  if (interaction.user.id !== room.ownerId) {
+    return interaction.reply({ content: 'Nur der Besitzer des Raums darf das ändern.', ephemeral: true });
+  }
+
+  if (action === 'toggle') {
+    room.public = !room.public;
+    saveRooms(config, guild.id, rooms);
+    await interaction.deferUpdate();
+    await applyMode(guild, config, channelId);
+    return interaction.message.edit(settingsPayload(room, channelId));
+  }
+
+  if (action === 'users') {
+    await interaction.deferUpdate();
+    const selected = interaction.values.filter((id) => id !== room.ownerId);
+    const role = guild.roles.cache.get(room.roleId);
+    for (const id of selected.filter((x) => !room.allowed.includes(x))) {
+      const m = await guild.members.fetch(id).catch(() => null);
+      if (m && role) await m.roles.add(role, 'Roxie: Zugang zum Talk-Raum').catch(() => {});
+    }
+    for (const id of room.allowed.filter((x) => !selected.includes(x))) {
+      const m = await guild.members.fetch(id).catch(() => null);
+      if (m && role) await m.roles.remove(role, 'Roxie: Zugang zum Talk-Raum entzogen').catch(() => {});
+    }
+    room.allowed = selected;
+    saveRooms(config, guild.id, rooms);
+    return interaction.message.edit(settingsPayload(room, channelId));
+  }
+}
+
 async function createRoom(member, hub, config) {
   const guild = member.guild;
   const rooms = getRooms(config, guild.id);
@@ -168,38 +280,60 @@ async function createRoom(member, hub, config) {
   }
 
   const name = member.displayName.slice(0, 100);
-  // Gleiche Sichtbarkeit wie der Talk-Kanal
-  const permissionOverwrites = hub.permissionOverwrites.cache.map((o) => ({
-    id: o.id,
-    type: o.type,
-    allow: o.allow,
-    deny: o.deny,
-  }));
 
-  const category = await guild.channels.create({
-    name,
-    type: ChannelType.GuildCategory,
-    reason: `Roxie: Talk-Raum für ${member.user.tag}`,
-    permissionOverwrites,
+  // Eigene Rolle für diesen Raum: gibt es nur, solange es die Kategorie gibt
+  const role = await guild.roles.create({
+    name: `Raum: ${name}`.slice(0, 100),
+    permissions: [],
+    reason: `Roxie: Raum-Rolle für ${member.user.tag}`,
   });
+  await member.roles.add(role, 'Roxie: Besitzer des Talk-Raums');
+
+  const permissionOverwrites = roomOverwrites(guild, hub, role.id, member.id, true);
+  const reason = `Roxie: Talk-Raum für ${member.user.tag}`;
+
+  const category = await guild.channels.create({ name, type: ChannelType.GuildCategory, reason, permissionOverwrites });
   const channel = await guild.channels.create({
     name,
     type: ChannelType.GuildVoice,
     parent: category.id,
-    reason: `Roxie: Talk-Raum für ${member.user.tag}`,
+    reason,
     permissionOverwrites,
   });
-
-  // Textkanal zum einfachen Chatten (gleiche Rechte wie Talk: alle mit der Rolle dürfen schreiben)
-  await guild.channels.create({
+  // Textkanal zum einfachen Chatten (am Anfang dürfen alle mit der Rolle „Online“ schreiben)
+  const chat = await guild.channels.create({
     name: 'chat',
     type: ChannelType.GuildText,
     parent: category.id,
-    reason: `Roxie: Chat für Talk-Raum von ${member.user.tag}`,
+    reason,
     permissionOverwrites,
   });
+  // Einstellungen: nur der Besitzer sieht den Kanal
+  const settings = await guild.channels.create({
+    name: 'einstellungen',
+    type: ChannelType.GuildText,
+    parent: category.id,
+    reason,
+    permissionOverwrites: [
+      { id: guild.roles.everyone.id, type: OverwriteType.Role, deny: [P.ViewChannel] },
+      { id: member.id, type: OverwriteType.Member, allow: [P.ViewChannel, P.ReadMessageHistory], deny: [P.SendMessages] },
+      { id: guild.client.user.id, type: OverwriteType.Member, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.ManageChannels] },
+    ],
+  });
 
-  rooms[channel.id] = { categoryId: category.id, ownerId: member.id, name };
+  const room = {
+    categoryId: category.id,
+    ownerId: member.id,
+    name,
+    roleId: role.id,
+    chatId: chat.id,
+    settingsId: settings.id,
+    public: true,
+    allowed: [],
+  };
+  const msg = await settings.send(settingsPayload(room, channel.id));
+  room.settingsMessageId = msg.id;
+  rooms[channel.id] = room;
   saveRooms(config, guild.id, rooms);
 
   try {
@@ -215,7 +349,7 @@ module.exports = {
   id: 'tempVoice',
   name: 'Talk-Räume',
   description:
-    'Wer den Sprachkanal „Talk“ betritt, bekommt eine eigene Kategorie mit Sprachkanal (nach ihm benannt) und Textkanal „chat“ und wird dorthin verschoben. Ist der Raum leer, erscheint ein gesperrter Kanal „timer“ mit einem großen Countdown (5 Minuten) und danach wird alles gelöscht.',
+    'Wer den Sprachkanal „Talk“ betritt, bekommt eine eigene Kategorie mit Sprachkanal (nach ihm benannt), Textkanal „chat“ und einem Einstellungskanal (nur für ihn: öffentlich/privat, wer rein darf) und wird dorthin verschoben. Er bekommt dafür eine eigene Raum-Rolle und Verwaltungsrechte für die Kategorie. Ist der Raum leer, erscheint ein gesperrter Kanal „timer“ mit einem großen Countdown (5 Minuten) und danach wird alles gelöscht.',
   settings: [],
 
   // Beim Start/Einschalten: übrig gebliebene Räume prüfen
@@ -228,6 +362,17 @@ module.exports = {
   },
 
   register(client, config) {
+    client.on(Events.InteractionCreate, async (interaction) => {
+      if (!interaction.guild || !(interaction.isButton() || interaction.isUserSelectMenu())) return;
+      if (!interaction.customId.startsWith('room:')) return;
+      if (!config.getModule(interaction.guild.id, 'tempVoice').enabled) return;
+      try {
+        await handleSettings(interaction, config);
+      } catch (err) {
+        console.error('[tempVoice] Einstellungen:', err.message);
+      }
+    });
+
     client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
       const guild = newState.guild;
       if (!config.getModule(guild.id, 'tempVoice').enabled) return;
