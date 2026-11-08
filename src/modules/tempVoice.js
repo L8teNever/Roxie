@@ -190,6 +190,15 @@ async function createRoom(member, hub, config) {
     permissionOverwrites,
   });
 
+  // Textkanal zum einfachen Chatten (gleiche Rechte wie Talk: alle mit der Rolle dürfen schreiben)
+  await guild.channels.create({
+    name: 'chat',
+    type: ChannelType.GuildText,
+    parent: category.id,
+    reason: `Roxie: Chat für Talk-Raum von ${member.user.tag}`,
+    permissionOverwrites,
+  });
+
   rooms[channel.id] = { categoryId: category.id, ownerId: member.id, name };
   saveRooms(config, guild.id, rooms);
 
@@ -206,7 +215,7 @@ module.exports = {
   id: 'tempVoice',
   name: 'Talk-Räume',
   description:
-    'Wer den Sprachkanal „Talk“ betritt, bekommt eine eigene Kategorie mit Sprachkanal (nach ihm benannt) und wird dorthin verschoben. Ist der Raum leer, erscheint ein gesperrter Kanal „timer“ mit einem großen Countdown (5 Minuten) und danach wird alles gelöscht.',
+    'Wer den Sprachkanal „Talk“ betritt, bekommt eine eigene Kategorie mit Sprachkanal (nach ihm benannt) und Textkanal „chat“ und wird dorthin verschoben. Ist der Raum leer, erscheint ein gesperrter Kanal „timer“ mit einem großen Countdown (5 Minuten) und danach wird alles gelöscht.',
   settings: [],
 
   // Beim Start/Einschalten: übrig gebliebene Räume prüfen
