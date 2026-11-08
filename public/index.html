@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roxie</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background:#1e1f22; color:#e3e5e8; margin:0; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
+  h1 { margin: 0 0 4px; }
+  .sub { color:#949ba4; margin-bottom: 24px; }
+  select, button { background:#2b2d31; color:inherit; border:1px solid #3f4147; border-radius:6px; padding:8px 10px; font-size:14px; }
+  .card { background:#2b2d31; border-radius:10px; padding:16px; margin-top:16px; }
+  .head { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  .head h2 { margin:0; font-size:18px; }
+  .desc { color:#b5bac1; margin:8px 0 12px; font-size:14px; }
+  label.field { display:block; font-size:13px; color:#b5bac1; margin-top:8px; }
+  label.field select { display:block; margin-top:4px; width:100%; }
+  .switch { position:relative; width:46px; height:26px; flex:none; }
+  .switch input { opacity:0; width:0; height:0; }
+  .slider { position:absolute; inset:0; background:#4e5058; border-radius:26px; cursor:pointer; transition:.2s; }
+  .slider:before { content:""; position:absolute; height:20px; width:20px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.2s; }
+  input:checked + .slider { background:#23a559; }
+  input:checked + .slider:before { transform:translateX(20px); }
+  #status { color:#949ba4; font-size:13px; height:18px; margin-top:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Roxie</h1>
+  <div class="sub" id="bot">Lade…</div>
+  <select id="guild"></select>
+  <div id="modules"></div>
+  <div id="status"></div>
+</main>
+<script>
+let state, guildId;
+const $ = (id) => document.getElementById(id);
+
+async function load() {
+  state = await (await fetch('/api/state')).json();
+  $('bot').textContent = state.bot ? `Eingeloggt als ${state.bot.tag}` : 'Bot verbindet sich…';
+  const sel = $('guild');
+  sel.innerHTML = state.guilds.map(g => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
+  if (!state.guilds.length) { $('modules').innerHTML = '<p class="desc">Roxie ist auf keinem Server. Lade sie zuerst ein.</p>'; return; }
+  guildId = state.guilds.some(g => g.id === guildId) ? guildId : state.guilds[0].id;
+  sel.value = guildId;
+  render();
+}
+
+function esc(s) { return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function render() {
+  const g = state.guilds.find(x => x.id === guildId);
+  $('modules').innerHTML = state.modules.map(m => {
+    const cur = g.modules[m.id];
+    const fields = m.settings.map(s => `
+      <label class="field">${esc(s.label)}
+        <select data-mod="${m.id}" data-key="${s.key}">
+          <option value="">– keine –</option>
+          ${g.roles.map(r => `<option value="${r.id}" ${cur.settings[s.key] === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
+        </select>
+      </label>`).join('');
+    return `<div class="card">
+      <div class="head"><h2>${esc(m.name)}</h2>
+        <label class="switch"><input type="checkbox" data-toggle="${m.id}" ${cur.enabled ? 'checked' : ''}><span class="slider"></span></label>
+      </div>
+      <div class="desc">${esc(m.description)}</div>${fields}${(m.actions || []).map(a => `<button data-action="${a.id}" data-mod="${m.id}" style="margin-top:12px">${esc(a.label)}</button>`).join('')}</div>`;
+  }).join('');
+}
+
+async function save(moduleId, body) {
+  $('status').textContent = 'Speichere…';
+  const r = await fetch(`/api/guilds/${guildId}/modules/${moduleId}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  if (!r.ok) { $('status').textContent = 'Fehler beim Speichern'; return; }
+  const g = state.guilds.find(x => x.id === guildId);
+  g.modules[moduleId] = await r.json();
+  $('status').textContent = 'Gespeichert ✓';
+}
+
+async function runAction(moduleId, actionId, btn) {
+  btn.disabled = true;
+  $('status').textContent = 'Läuft… (kann bei vielen Mitgliedern etwas dauern)';
+  try {
+    const r = await fetch(`/api/guilds/${guildId}/modules/${moduleId}/actions/${actionId}`, { method: 'POST' });
+    const d = await r.json();
+    $('status').textContent = r.ok
+      ? `Fertig ✓ ${d.given} Mitglieder bekommen die Rolle${d.failed ? `, ${d.failed} fehlgeschlagen (Rechte/Rollenreihenfolge prüfen)` : ''}`
+      : `Fehler: ${d.error}`;
+  } catch { $('status').textContent = 'Fehler bei der Aktion'; }
+  btn.disabled = false;
+}
+
+$('guild').onchange = e => { guildId = e.target.value; render(); };
+$('modules').onclick = e => {
+  const b = e.target.closest('button[data-action]');
+  if (b) runAction(b.dataset.mod, b.dataset.action, b);
+};
+$('modules').onchange = e => {
+  const t = e.target;
+  if (t.dataset.toggle) save(t.dataset.toggle, { enabled: t.checked });
+  else if (t.dataset.mod && t.dataset.key) save(t.dataset.mod, { settings: { [t.dataset.key]: t.value } });
+};
+load();
+setInterval(() => { if (!document.activeElement || document.activeElement.tagName !== 'SELECT') load(); }, 30000);
+</script>
+</body>
+</html>

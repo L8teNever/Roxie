@@ -1,0 +1,10 @@
+services:
+  roxie:
+    image: ghcr.io/l8tenever/roxie:latest
+    container_name: roxie
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data

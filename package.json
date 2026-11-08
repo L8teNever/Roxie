@@ -1,0 +1,15 @@
+{
+  "name": "roxie",
+  "version": "0.1.0",
+  "description": "Roxie – Discord-Bot mit lokaler Web-Oberfläche und schaltbaren Modulen",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "express": "^4.21.1"
+  }
+}
