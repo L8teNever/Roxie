@@ -32,58 +32,75 @@ async function ensureRole(guild, config) {
   return role;
 }
 
-// Legt den Kanal "allgemein" an, den nur Leute mit der Rolle sehen. Ein vorhandener Kanal wird nicht angefasst.
+// Sorgt für den Text-Chat "allgemein" und den Sprachkanal "Talk". Ausgewählte (auf der Website gespeicherte) oder
+// schon vorhandene Kanäle werden benutzt und nicht angefasst. Fehlende werden neu angelegt, nur für die Rolle sichtbar.
 async function ensureChannel(guild, role, client, config) {
   const mod = config.getModule(guild.id, 'rulesRole');
   const channels = await guild.channels.fetch();
-  const existing =
-    (mod.settings.channelId && channels.get(mod.settings.channelId)) ||
-    channels.find((c) => c.type === ChannelType.GuildText && c.name === CHANNEL_NAME);
-  if (existing) {
-    if (mod.settings.channelId !== existing.id) config.setModule(guild.id, 'rulesRole', { settings: { channelId: existing.id } });
-    return existing;
+  const saved = (id, type) => {
+    const c = id && channels.get(id);
+    return c && c.type === type ? c : null;
+  };
+
+  let text =
+    saved(mod.settings.channelId, ChannelType.GuildText) ||
+    channels.find((c) => c.type === ChannelType.GuildText && c.name === CHANNEL_NAME) ||
+    null;
+  let voice =
+    saved(mod.settings.voiceId, ChannelType.GuildVoice) ||
+    channels.find((c) => c.type === ChannelType.GuildVoice && c.name === VOICE_NAME) ||
+    null;
+
+  if (!text || !voice) {
+    const permissionOverwrites = [
+      { id: guild.roles.everyone.id, deny: [P.ViewChannel] },
+      { id: role.id, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.Connect, P.Speak] },
+      // Der Bot selbst darf immer alles sehen
+      { id: client.user.id, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.ManageChannels] },
+    ];
+
+    // Kategorie des vorhandenen Kanals, sonst "Allgemein" (suchen oder anlegen)
+    let parentId = (text || voice)?.parentId ?? null;
+    if (!text && !voice) {
+      const category =
+        (mod.settings.categoryId && channels.get(mod.settings.categoryId)) ||
+        channels.find((c) => c.type === ChannelType.GuildCategory && c.name === CATEGORY_NAME) ||
+        (await guild.channels.create({
+          name: CATEGORY_NAME,
+          type: ChannelType.GuildCategory,
+          reason: 'Roxie: Kategorie für Mitglieder, die die Regeln akzeptiert haben',
+          permissionOverwrites,
+        }));
+      parentId = category.id;
+      config.setModule(guild.id, 'rulesRole', { settings: { categoryId: category.id } });
+    }
+
+    if (!text) {
+      text = await guild.channels.create({
+        name: CHANNEL_NAME,
+        type: ChannelType.GuildText,
+        parent: parentId,
+        reason: 'Roxie: Kanal nur für Mitglieder, die die Regeln akzeptiert haben',
+        permissionOverwrites,
+      });
+      console.log(`[rulesRole] Kanal #${CHANNEL_NAME} in ${guild.name} erstellt`);
+    }
+    if (!voice) {
+      voice = await guild.channels.create({
+        name: VOICE_NAME,
+        type: ChannelType.GuildVoice,
+        parent: parentId,
+        reason: 'Roxie: Sprachkanal für Mitglieder, die die Regeln akzeptiert haben',
+        permissionOverwrites,
+      });
+      console.log(`[rulesRole] Sprachkanal ${VOICE_NAME} in ${guild.name} erstellt`);
+    }
   }
 
-  const permissionOverwrites = [
-    { id: guild.roles.everyone.id, deny: [P.ViewChannel] },
-    { id: role.id, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.Connect, P.Speak] },
-    // Der Bot selbst darf immer alles sehen
-    { id: client.user.id, allow: [P.ViewChannel, P.SendMessages, P.ReadMessageHistory, P.ManageChannels] },
-  ];
-
-  // Passende Kategorie (nur wenn der Kanal neu angelegt wird)
-  const category =
-    (mod.settings.categoryId && channels.get(mod.settings.categoryId)) ||
-    channels.find((c) => c.type === ChannelType.GuildCategory && c.name === CATEGORY_NAME) ||
-    (await guild.channels.create({
-      name: CATEGORY_NAME,
-      type: ChannelType.GuildCategory,
-      reason: 'Roxie: Kategorie für Mitglieder, die die Regeln akzeptiert haben',
-      permissionOverwrites,
-    }));
-
-  const channel = await guild.channels.create({
-    name: CHANNEL_NAME,
-    type: ChannelType.GuildText,
-    parent: category.id,
-    reason: 'Roxie: Kanal nur für Mitglieder, die die Regeln akzeptiert haben',
-    permissionOverwrites,
-  });
-
-  // Sprachkanal in derselben Kategorie (nur wenn es noch keinen gleichnamigen gibt)
-  if (!channels.some((c) => c.type === ChannelType.GuildVoice && c.name === VOICE_NAME)) {
-    const voice = await guild.channels.create({
-      name: VOICE_NAME,
-      type: ChannelType.GuildVoice,
-      parent: category.id,
-      reason: 'Roxie: Sprachkanal für Mitglieder, die die Regeln akzeptiert haben',
-      permissionOverwrites,
-    });
-    config.setModule(guild.id, 'rulesRole', { settings: { voiceId: voice.id } });
+  if (mod.settings.channelId !== text.id || mod.settings.voiceId !== voice.id) {
+    config.setModule(guild.id, 'rulesRole', { settings: { channelId: text.id, voiceId: voice.id } });
   }
-  config.setModule(guild.id, 'rulesRole', { settings: { channelId: channel.id, categoryId: category.id } });
-  console.log(`[rulesRole] Kanal #${CHANNEL_NAME} in ${guild.name} erstellt`);
-  return channel;
+  return text;
 }
 
 module.exports = {
@@ -91,7 +108,10 @@ module.exports = {
   name: 'Regeln akzeptiert',
   description:
     'Wenn ein neuer User die Server-Regeln akzeptiert hat, bekommt er automatisch die Rolle „Online“ (wird von Roxie angelegt und in der Mitgliederliste gruppiert angezeigt). Dazu legt Roxie die Kategorie „Allgemein“ mit dem Textkanal „allgemein“ und dem Sprachkanal „Talk“ an, die nur diese Rolle sieht.',
-  settings: [],
+  settings: [
+    { key: 'channelId', label: 'Allgemeiner Chat (leer = automatisch anlegen)', type: 'textChannel' },
+    { key: 'voiceId', label: 'Talk-Sprachkanal (leer = automatisch anlegen)', type: 'voiceChannel' },
+  ],
   actions: [{ id: 'giveAll', label: 'Allen aktuellen Mitgliedern die Rolle geben' }],
 
   // Gibt die Rolle allen, die sie noch nicht haben (ohne Bots und ohne User, die die Regeln noch nicht akzeptiert haben)

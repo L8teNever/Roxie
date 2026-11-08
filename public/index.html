@@ -55,13 +55,18 @@ function render() {
   const g = state.guilds.find(x => x.id === guildId);
   $('modules').innerHTML = state.modules.map(m => {
     const cur = g.modules[m.id];
-    const fields = m.settings.map(s => `
+    const fields = m.settings.map(s => {
+      let items, empty;
+      if (s.type === 'role') { items = g.roles; empty = '– keine –'; }
+      else { items = g.channels.filter(c => c.type === (s.type === 'textChannel' ? 'text' : 'voice')); empty = '– automatisch anlegen –'; }
+      return `
       <label class="field">${esc(s.label)}
         <select data-mod="${m.id}" data-key="${s.key}">
-          <option value="">– keine –</option>
-          ${g.roles.map(r => `<option value="${r.id}" ${cur.settings[s.key] === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
+          <option value="">${empty}</option>
+          ${items.map(r => `<option value="${r.id}" ${cur.settings[s.key] === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('')}
         </select>
-      </label>`).join('');
+      </label>`;
+    }).join('');
     return `<div class="card">
       <div class="head"><h2>${esc(m.name)}</h2>
         <label class="switch"><input type="checkbox" data-toggle="${m.id}" ${cur.enabled ? 'checked' : ''}><span class="slider"></span></label>
