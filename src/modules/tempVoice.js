@@ -14,6 +14,8 @@ const {
 } = require('discord.js');
 
 const HUB_NAME = 'Talk';
+// Trennrolle in der Rollenliste: darunter stehen die Raum-Rollen
+const DIVIDER_NAME = 'Raum:⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀';
 const EMPTY_MINUTES = 5;
 const TICK_SECONDS = 10;
 const WRITE = [
@@ -299,6 +301,25 @@ async function handleSettings(interaction, config) {
   }
 }
 
+// Trennrolle "Raum:" (gibt es nur einmal pro Server). Die Raum-Rollen werden direkt darunter einsortiert.
+async function ensureDivider(guild, config) {
+  await guild.roles.fetch();
+  const savedId = config.getModule(guild.id, 'tempVoice').settings.dividerId;
+  let divider =
+    (savedId && guild.roles.cache.get(savedId)) ||
+    guild.roles.cache.find((r) => r.name === DIVIDER_NAME && !r.managed);
+  if (!divider) {
+    divider = await guild.roles.create({
+      name: DIVIDER_NAME,
+      permissions: [],
+      reason: 'Roxie: Trennrolle für Talk-Raum-Rollen',
+    });
+    console.log(`[tempVoice] Trennrolle in ${guild.name} erstellt`);
+  }
+  if (savedId !== divider.id) config.setModule(guild.id, 'tempVoice', { settings: { dividerId: divider.id } });
+  return divider;
+}
+
 async function createRoom(member, hub, config) {
   const guild = member.guild;
   const rooms = getRooms(config, guild.id);
@@ -313,10 +334,15 @@ async function createRoom(member, hub, config) {
   const name = member.displayName.slice(0, 100);
 
   // Eigene Rolle für diesen Raum: gibt es nur, solange es die Kategorie gibt
+  const divider = await ensureDivider(guild, config);
   const role = await guild.roles.create({
-    name: `Raum: ${name}`.slice(0, 100),
+    name, // nur der Name des Raums
     permissions: [],
     reason: `Roxie: Raum-Rolle für ${member.user.tag}`,
+  });
+  // Direkt unter die Trennrolle "Raum:" sortieren
+  await role.setPosition(divider.position, { reason: 'Roxie: unter die Trennrolle' }).catch((err) => {
+    console.error('[tempVoice] Rolle konnte nicht unter die Trennrolle:', err.message);
   });
   await member.roles.add(role, 'Roxie: Besitzer des Talk-Raums');
 
@@ -380,7 +406,7 @@ module.exports = {
   id: 'tempVoice',
   name: 'Talk-Räume',
   description:
-    'Wer den Sprachkanal „Talk“ betritt, bekommt eine eigene Kategorie mit Sprachkanal (nach ihm benannt), Textkanal „chat“ und einem Einstellungskanal (nur für ihn: öffentlich/privat, wer rein darf) und wird dorthin verschoben. Er bekommt dafür eine eigene Raum-Rolle und Verwaltungsrechte für die Kategorie. Ist der Raum leer, erscheint ein gesperrter Kanal „timer“ mit einem großen Countdown (5 Minuten) und danach wird alles gelöscht.',
+    'Wer den Sprachkanal „Talk“ betritt, bekommt eine eigene Kategorie mit Sprachkanal (nach ihm benannt), Textkanal „chat“ und einem Einstellungskanal (nur für ihn: öffentlich/privat, wer rein darf) und wird dorthin verschoben. Er bekommt dafür eine eigene Raum-Rolle (nur der Raumname, einsortiert unter der Trennrolle „Raum:“) und Verwaltungsrechte für die Kategorie. Ist der Raum leer, erscheint ein gesperrter Kanal „timer“ mit einem großen Countdown (5 Minuten) und danach wird alles gelöscht.',
   settings: [],
 
   // Beim Start/Einschalten: übrig gebliebene Räume prüfen
