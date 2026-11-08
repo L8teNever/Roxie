@@ -199,22 +199,41 @@ function settingsPayload(room, channelId) {
     .setLabel(room.public ? 'Auf privat stellen' : 'Auf öffentlich stellen')
     .setEmoji(room.public ? '🔒' : '🌐')
     .setStyle(room.public ? ButtonStyle.Danger : ButtonStyle.Success);
-  const users = new UserSelectMenuBuilder()
-    .setCustomId(`room:users:${channelId}`)
-    .setPlaceholder('Wer darf in deinen Raum? (bei „Privat“ nötig)')
-    .setMinValues(0)
+  const addAll = new ButtonBuilder()
+    .setCustomId(`room:addall:${channelId}`)
+    .setLabel('Alle hinzufügen')
+    .setEmoji('👥')
+    .setStyle(ButtonStyle.Primary);
+  const removeAll = new ButtonBuilder()
+    .setCustomId(`room:removeall:${channelId}`)
+    .setLabel('Alle entfernen')
+    .setStyle(ButtonStyle.Secondary);
+  // Discord erlaubt pro Auswahl höchstens 25 User, darum je ein Menü zum Hinzufügen und zum Entfernen
+  const add = new UserSelectMenuBuilder()
+    .setCustomId(`room:add:${channelId}`)
+    .setPlaceholder('User hinzufügen (bis zu 25 auf einmal)')
+    .setMinValues(1)
     .setMaxValues(25);
-  if (room.allowed.length) users.setDefaultUsers(room.allowed.slice(0, 25));
+  const remove = new UserSelectMenuBuilder()
+    .setCustomId(`room:remove:${channelId}`)
+    .setPlaceholder('User entfernen')
+    .setMinValues(1)
+    .setMaxValues(25);
 
   return {
     content:
       `# ⚙️ Einstellungen: ${room.name}\n` +
       (room.public
         ? '**Öffentlich:** Alle mit der Rolle „Online“ sehen deinen Raum und dürfen rein.'
-        : '**Privat:** Nur du und die unten ausgewählten User sehen deinen Raum.') +
-      '\nDie Auswahl unten bestimmt, wer in deinen Raum darf, sobald er privat ist. ' +
-      'Der Raum wird gelöscht, wenn er 5 Minuten leer ist.',
-    components: [new ActionRowBuilder().addComponents(toggle), new ActionRowBuilder().addComponents(users)],
+        : '**Privat:** Nur du und die ausgewählten User sehen deinen Raum.') +
+      `\n**Ausgewählte User:** ${room.allowed.length ? room.allowed.map((id) => `<@${id}>`).join(' ') : 'keine'}` +
+      '\nDie Auswahl zählt, sobald der Raum privat ist. Der Raum wird gelöscht, wenn er 5 Minuten leer ist.',
+    allowedMentions: { parse: [] },
+    components: [
+      new ActionRowBuilder().addComponents(toggle, addAll, removeAll),
+      new ActionRowBuilder().addComponents(add),
+      new ActionRowBuilder().addComponents(remove),
+    ],
   };
 }
 
@@ -250,19 +269,31 @@ async function handleSettings(interaction, config) {
     return interaction.message.edit(settingsPayload(room, channelId));
   }
 
-  if (action === 'users') {
+  if (['add', 'users', 'remove', 'addall', 'removeall'].includes(action)) {
     await interaction.deferUpdate();
-    const selected = interaction.values.filter((id) => id !== room.ownerId);
     const role = guild.roles.cache.get(room.roleId);
-    for (const id of selected.filter((x) => !room.allowed.includes(x))) {
-      const m = await guild.members.fetch(id).catch(() => null);
-      if (m && role) await m.roles.add(role, 'Roxie: Zugang zum Talk-Raum').catch(() => {});
+    let toAdd = [];
+    let toRemove = [];
+
+    if (action === 'add' || action === 'users') toAdd = interaction.values;
+    else if (action === 'remove') toRemove = interaction.values;
+    else if (action === 'removeall') toRemove = [...room.allowed];
+    else {
+      const members = await guild.members.fetch();
+      toAdd = members.filter((m) => !m.user.bot).map((m) => m.id);
     }
-    for (const id of room.allowed.filter((x) => !selected.includes(x))) {
+
+    toAdd = toAdd.filter((id) => id !== room.ownerId);
+    toRemove = toRemove.filter((id) => id !== room.ownerId);
+    for (const id of toAdd) {
+      const m = await guild.members.fetch(id).catch(() => null);
+      if (m && role && !m.roles.cache.has(role.id)) await m.roles.add(role, 'Roxie: Zugang zum Talk-Raum').catch(() => {});
+    }
+    for (const id of toRemove) {
       const m = await guild.members.fetch(id).catch(() => null);
       if (m && role) await m.roles.remove(role, 'Roxie: Zugang zum Talk-Raum entzogen').catch(() => {});
     }
-    room.allowed = selected;
+    room.allowed = [...new Set([...room.allowed, ...toAdd])].filter((id) => !toRemove.includes(id));
     saveRooms(config, guild.id, rooms);
     return interaction.message.edit(settingsPayload(room, channelId));
   }
