@@ -129,7 +129,7 @@ async function cancelCountdown(guild, config, channelId) {
   await removeCountdown(guild, config, channelId);
 }
 
-async function deleteRoom(guild, config, channelId) {
+async function deleteRoom(guild, config, channelId, reason = 'Roxie: Talk-Raum war 5 Minuten leer') {
   stopTimer(channelId);
   const rooms = getRooms(config, guild.id);
   const room = rooms[channelId];
@@ -139,12 +139,12 @@ async function deleteRoom(guild, config, channelId) {
   try {
     // Erst alle Kanäle der Kategorie (Raum + Countdown), dann die Kategorie selbst
     for (const ch of guild.channels.cache.filter((c) => c.parentId === room.categoryId).values()) {
-      await ch.delete('Roxie: Talk-Raum war 5 Minuten leer');
+      await ch.delete(reason);
     }
     const category = guild.channels.cache.get(room.categoryId);
-    if (category) await category.delete('Roxie: Talk-Raum war 5 Minuten leer');
+    if (category) await category.delete(reason);
     const role = room.roleId && guild.roles.cache.get(room.roleId);
-    if (role) await role.delete('Roxie: Talk-Raum war 5 Minuten leer');
+    if (role) await role.delete(reason);
     console.log(`[tempVoice] Raum ${room.name} in ${guild.name} gelöscht`);
   } catch (err) {
     console.error('[tempVoice] Löschen fehlgeschlagen:', err.message);
@@ -210,6 +210,11 @@ function settingsPayload(room, channelId) {
     .setCustomId(`room:removeall:${channelId}`)
     .setLabel('Alle entfernen')
     .setStyle(ButtonStyle.Secondary);
+  const del = new ButtonBuilder()
+    .setCustomId(`room:delete:${channelId}`)
+    .setLabel('Raum löschen')
+    .setEmoji('🗑️')
+    .setStyle(ButtonStyle.Danger);
   // Discord erlaubt pro Auswahl höchstens 25 User, darum je ein Menü zum Hinzufügen und zum Entfernen
   const add = new UserSelectMenuBuilder()
     .setCustomId(`room:add:${channelId}`)
@@ -229,10 +234,10 @@ function settingsPayload(room, channelId) {
         ? '**Öffentlich:** Alle mit der Rolle „Online“ sehen deinen Raum und dürfen rein.'
         : '**Privat:** Nur du und die ausgewählten User sehen deinen Raum.') +
       `\n**Ausgewählte User:** ${room.allowed.length ? room.allowed.map((id) => `<@${id}>`).join(' ') : 'keine'}` +
-      '\nDie Auswahl zählt, sobald der Raum privat ist. Der Raum wird gelöscht, wenn er 5 Minuten leer ist.',
+      '\nDie Auswahl zählt, sobald der Raum privat ist. Der Raum wird gelöscht, wenn er 5 Minuten leer ist, oder sofort mit dem Button unten.',
     allowedMentions: { parse: [] },
     components: [
-      new ActionRowBuilder().addComponents(toggle, addAll, removeAll),
+      new ActionRowBuilder().addComponents(toggle, addAll, removeAll, del),
       new ActionRowBuilder().addComponents(add),
       new ActionRowBuilder().addComponents(remove),
     ],
@@ -261,6 +266,11 @@ async function handleSettings(interaction, config) {
   if (!room) return interaction.reply({ content: 'Diesen Raum gibt es nicht mehr.', ephemeral: true });
   if (interaction.user.id !== room.ownerId) {
     return interaction.reply({ content: 'Nur der Besitzer des Raums darf das ändern.', ephemeral: true });
+  }
+
+  if (action === 'delete') {
+    await interaction.deferUpdate();
+    return deleteRoom(guild, config, channelId, 'Roxie: Raum vom Besitzer gelöscht');
   }
 
   if (action === 'toggle') {
