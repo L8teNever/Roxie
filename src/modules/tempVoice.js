@@ -12,6 +12,7 @@ const {
   ButtonStyle,
   UserSelectMenuBuilder,
 } = require('discord.js');
+const { keepBottom } = require('../util');
 
 const HUB_NAME = 'Talk';
 // Trennrolle in der Rollenliste: darunter stehen die Raum-Rollen
@@ -39,7 +40,7 @@ function findHub(guild, config) {
   const id = config.getModule(guild.id, 'rulesRole').settings.voiceId;
   return (
     (id && guild.channels.cache.get(id)) ||
-    guild.channels.cache.find((c) => c.type === ChannelType.GuildVoice && c.name === HUB_NAME)
+    guild.channels.cache.find((c) => c.type === ChannelType.GuildVoice && c.name === (config.getModule(guild.id, 'rulesRole').settings.voiceName || HUB_NAME))
   );
 }
 
@@ -382,6 +383,7 @@ async function createRoom(member, hub, config) {
   const reason = `Roxie: Talk-Raum für ${member.user.tag}`;
 
   const category = await guild.channels.create({ name, type: ChannelType.GuildCategory, reason, permissionOverwrites });
+  await keepBottom(guild, config); // z. B. "Admin" bleibt unter der neuen Kategorie
   const channel = await guild.channels.create({
     name,
     type: ChannelType.GuildVoice,
@@ -440,11 +442,18 @@ module.exports = {
   name: 'Talk-Räume',
   description:
     'Wer den Sprachkanal „Talk“ betritt, bekommt eine eigene Kategorie mit Sprachkanal (nach ihm benannt), Textkanal „chat“ und einem Einstellungskanal (nur für ihn: öffentlich/privat, wer rein darf) und wird dorthin verschoben. Er bekommt dafür eine eigene Raum-Rolle (nur der Raumname, einsortiert unter der Trennrolle „Raum:“) und Verwaltungsrechte für die Kategorie. Ist der Raum leer, erscheint ein gesperrter Kanal „timer“ mit einem großen Countdown (5 Minuten) und danach wird alles gelöscht.',
-  settings: [],
+  settings: [
+    { key: 'bottomCategoryId', label: 'Kategorie, die immer ganz unten bleibt (z. B. Admin)', type: 'categoryChannel' },
+  ],
+
+  async applySettings(guild, config) {
+    await keepBottom(guild, config);
+  },
 
   // Beim Start/Einschalten: übrig gebliebene Räume prüfen
   async setup(guild, config) {
     await guild.channels.fetch();
+    await keepBottom(guild, config);
     for (const channelId of Object.keys(getRooms(config, guild.id))) {
       await removeCountdown(guild, config, channelId); // übrig gebliebener Countdown von vor dem Neustart
       await checkRoom(guild, config, channelId);

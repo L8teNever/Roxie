@@ -48,12 +48,12 @@ app.get('/api/state', (req, res) => {
         .sort((a, b) => b.position - a.position)
         .map((r) => ({ id: r.id, name: r.name })),
       channels: g.channels.cache
-        .filter((c) => c.type === ChannelType.GuildText || c.type === ChannelType.GuildVoice)
+        .filter((c) => [ChannelType.GuildText, ChannelType.GuildVoice, ChannelType.GuildCategory].includes(c.type))
         .sort((a, b) => (a.parent?.rawPosition ?? -1) - (b.parent?.rawPosition ?? -1) || a.rawPosition - b.rawPosition)
         .map((c) => ({
           id: c.id,
           name: c.parent ? `${c.parent.name} / ${c.name}` : c.name,
-          type: c.type === ChannelType.GuildText ? 'text' : 'voice',
+          type: { [ChannelType.GuildText]: 'text', [ChannelType.GuildVoice]: 'voice', [ChannelType.GuildCategory]: 'category' }[c.type],
         })),
       modules: Object.fromEntries(modules.map((m) => [m.id, config.getModule(g.id, m.id)])),
     })),
@@ -72,10 +72,11 @@ app.put('/api/guilds/:guildId/modules/:moduleId', async (req, res) => {
   for (const def of mod.settings || []) {
     const v = settings?.[def.key];
     if (!def.type.endsWith('Channel') || v === undefined || v === '') continue;
-    const want = def.type === 'textChannel' ? ChannelType.GuildText : ChannelType.GuildVoice;
+    const want = { textChannel: ChannelType.GuildText, voiceChannel: ChannelType.GuildVoice, categoryChannel: ChannelType.GuildCategory }[def.type];
     if (guild.channels.cache.get(v)?.type !== want) return res.status(400).json({ error: 'Ungültiger Kanal' });
   }
   config.setModule(guildId, moduleId, { enabled, settings });
+  if (settings && mod.applySettings) await mod.applySettings(guild, config).catch((e) => console.error('[web]', e.message));
   if (enabled) await setupGuild(client.guilds.cache.get(guildId));
   res.json(config.getModule(guildId, moduleId));
 });

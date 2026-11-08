@@ -2,6 +2,7 @@
 // (Discords "Regeln bestätigen" beim Beitritt, Member Screening).
 // Die Rolle wird automatisch angelegt und in der Mitgliederliste separat gruppiert angezeigt.
 const { Events, ChannelType, PermissionFlagsBits: P } = require('discord.js');
+const { keepBottom, textName } = require('../util');
 
 const ROLE_NAME = 'Online';
 const CHANNEL_NAME = 'allgemein';
@@ -34,8 +35,16 @@ async function ensureRole(guild, config) {
 
 // Sorgt für den Text-Chat "allgemein" und den Sprachkanal "Talk". Ausgewählte (auf der Website gespeicherte) oder
 // schon vorhandene Kanäle werden benutzt und nicht angefasst. Fehlende werden neu angelegt, nur für die Rolle sichtbar.
+// Namen aus den Einstellungen (Website), sonst die Standardnamen
+const names = (mod) => ({
+  category: mod.settings.categoryName || CATEGORY_NAME,
+  text: textName(mod.settings.textName || CHANNEL_NAME),
+  voice: mod.settings.voiceName || VOICE_NAME,
+});
+
 async function ensureChannel(guild, role, client, config) {
   const mod = config.getModule(guild.id, 'rulesRole');
+  const n = names(mod);
   const channels = await guild.channels.fetch();
   const saved = (id, type) => {
     const c = id && channels.get(id);
@@ -44,11 +53,11 @@ async function ensureChannel(guild, role, client, config) {
 
   let text =
     saved(mod.settings.channelId, ChannelType.GuildText) ||
-    channels.find((c) => c.type === ChannelType.GuildText && c.name === CHANNEL_NAME) ||
+    channels.find((c) => c.type === ChannelType.GuildText && c.name === n.text) ||
     null;
   let voice =
     saved(mod.settings.voiceId, ChannelType.GuildVoice) ||
-    channels.find((c) => c.type === ChannelType.GuildVoice && c.name === VOICE_NAME) ||
+    channels.find((c) => c.type === ChannelType.GuildVoice && c.name === n.voice) ||
     null;
 
   if (!text || !voice) {
@@ -64,9 +73,9 @@ async function ensureChannel(guild, role, client, config) {
     if (!text && !voice) {
       const category =
         (mod.settings.categoryId && channels.get(mod.settings.categoryId)) ||
-        channels.find((c) => c.type === ChannelType.GuildCategory && c.name === CATEGORY_NAME) ||
+        channels.find((c) => c.type === ChannelType.GuildCategory && c.name === n.category) ||
         (await guild.channels.create({
-          name: CATEGORY_NAME,
+          name: n.category,
           type: ChannelType.GuildCategory,
           reason: 'Roxie: Kategorie für Mitglieder, die die Regeln akzeptiert haben',
           permissionOverwrites,
@@ -77,29 +86,30 @@ async function ensureChannel(guild, role, client, config) {
 
     if (!text) {
       text = await guild.channels.create({
-        name: CHANNEL_NAME,
+        name: n.text,
         type: ChannelType.GuildText,
         parent: parentId,
         reason: 'Roxie: Kanal nur für Mitglieder, die die Regeln akzeptiert haben',
         permissionOverwrites,
       });
-      console.log(`[rulesRole] Kanal #${CHANNEL_NAME} in ${guild.name} erstellt`);
+      console.log(`[rulesRole] Kanal #${n.text} in ${guild.name} erstellt`);
     }
     if (!voice) {
       voice = await guild.channels.create({
-        name: VOICE_NAME,
+        name: n.voice,
         type: ChannelType.GuildVoice,
         parent: parentId,
         reason: 'Roxie: Sprachkanal für Mitglieder, die die Regeln akzeptiert haben',
         permissionOverwrites,
       });
-      console.log(`[rulesRole] Sprachkanal ${VOICE_NAME} in ${guild.name} erstellt`);
+      console.log(`[rulesRole] Sprachkanal ${n.voice} in ${guild.name} erstellt`);
     }
   }
 
   if (mod.settings.channelId !== text.id || mod.settings.voiceId !== voice.id) {
     config.setModule(guild.id, 'rulesRole', { settings: { channelId: text.id, voiceId: voice.id } });
   }
+  await keepBottom(guild, config);
   return text;
 }
 
@@ -111,7 +121,31 @@ module.exports = {
   settings: [
     { key: 'channelId', label: 'Allgemeiner Chat (leer = automatisch anlegen)', type: 'textChannel' },
     { key: 'voiceId', label: 'Talk-Sprachkanal (leer = automatisch anlegen)', type: 'voiceChannel' },
+    { key: 'categoryName', label: 'Name der Kategorie', type: 'text', placeholder: CATEGORY_NAME },
+    { key: 'textName', label: 'Name des Chats', type: 'text', placeholder: CHANNEL_NAME },
+    { key: 'voiceName', label: 'Name des Talk-Sprachkanals', type: 'text', placeholder: VOICE_NAME },
   ],
+
+  // Nach Änderungen auf der Website: Namen auf dem Server anpassen
+  async applySettings(guild, config) {
+    const mod = config.getModule(guild.id, 'rulesRole');
+    if (!mod.enabled) return;
+    const st = mod.settings;
+    await guild.channels.fetch();
+    const rename = async (ch, name) => {
+      if (ch && name && ch.name !== name) await ch.setName(name, 'Roxie: Name auf der Website geändert');
+    };
+    const text = st.channelId && guild.channels.cache.get(st.channelId);
+    const category = (st.categoryId && guild.channels.cache.get(st.categoryId)) || text?.parent;
+    try {
+      await rename(category, st.categoryName);
+      await rename(text, st.textName && textName(st.textName));
+      await rename(st.voiceId && guild.channels.cache.get(st.voiceId), st.voiceName);
+    } catch (err) {
+      console.error('[rulesRole] Umbenennen fehlgeschlagen:', err.message);
+    }
+    await this.setup(guild, config);
+  },
   actions: [{ id: 'giveAll', label: 'Allen aktuellen Mitgliedern die Rolle geben' }],
 
   // Gibt die Rolle allen, die sie noch nicht haben (ohne Bots und ohne User, die die Regeln noch nicht akzeptiert haben)
