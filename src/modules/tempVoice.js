@@ -146,6 +146,7 @@ async function deleteRoom(guild, config, channelId, reason = 'Roxie: Talk-Raum w
     const role = room.roleId && guild.roles.cache.get(room.roleId);
     if (role) await role.delete(reason);
     console.log(`[tempVoice] Raum ${room.name} in ${guild.name} gelöscht`);
+    for (const id of new Set([room.ownerId, ...(room.allowed || [])])) await syncDivider(guild, config, id);
   } catch (err) {
     console.error('[tempVoice] Löschen fehlgeschlagen:', err.message);
   }
@@ -307,6 +308,7 @@ async function handleSettings(interaction, config) {
     }
     room.allowed = [...new Set([...room.allowed, ...toAdd])].filter((id) => !toRemove.includes(id));
     saveRooms(config, guild.id, rooms);
+    for (const id of new Set([...toAdd, ...toRemove])) await syncDivider(guild, config, id);
     return interaction.message.edit(settingsPayload(room, channelId));
   }
 }
@@ -328,6 +330,26 @@ async function ensureDivider(guild, config) {
   }
   if (savedId !== divider.id) config.setModule(guild.id, 'tempVoice', { settings: { dividerId: divider.id } });
   return divider;
+}
+
+// Wer in mindestens einem Raum ist (Besitzer oder ausgewählt), trägt die Trennrolle "Raum:", sonst nicht
+async function syncDivider(guild, config, userId) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  if (!member) return;
+  const inRoom = Object.values(getRooms(config, guild.id)).some(
+    (r) => r.ownerId === userId || (r.allowed || []).includes(userId),
+  );
+  try {
+    if (inRoom) {
+      const divider = await ensureDivider(guild, config);
+      if (!member.roles.cache.has(divider.id)) await member.roles.add(divider, 'Roxie: Trennrolle für Talk-Raum');
+    } else {
+      const id = config.getModule(guild.id, 'tempVoice').settings.dividerId;
+      if (id && member.roles.cache.has(id)) await member.roles.remove(id, 'Roxie: kein Talk-Raum mehr');
+    }
+  } catch (err) {
+    console.error('[tempVoice] Trennrolle:', err.message);
+  }
 }
 
 async function createRoom(member, hub, config) {
@@ -402,6 +424,7 @@ async function createRoom(member, hub, config) {
   room.settingsMessageId = msg.id;
   rooms[channel.id] = room;
   saveRooms(config, guild.id, rooms);
+  await syncDivider(guild, config, member.id);
 
   try {
     await member.voice.setChannel(channel);
@@ -426,6 +449,8 @@ module.exports = {
       await removeCountdown(guild, config, channelId); // übrig gebliebener Countdown von vor dem Neustart
       await checkRoom(guild, config, channelId);
     }
+    const users = new Set(Object.values(getRooms(config, guild.id)).flatMap((r) => [r.ownerId, ...(r.allowed || [])]));
+    for (const id of users) await syncDivider(guild, config, id);
   },
 
   register(client, config) {
